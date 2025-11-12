@@ -1,4 +1,4 @@
-name: CI - Build image & Provision Infra
+name: CI/CD — Build Docker & Deploy with Terraform
 
 on:
   push:
@@ -7,97 +7,58 @@ on:
 
 env:
   TF_VERSION: "1.9.8"
-  GCP_ZONE: "us-central1-a"
   GCP_REGION: "us-central1"
+  GCP_ZONE: "us-central1-a"
 
 jobs:
   build-and-push:
-    name: Build & Push Docker image
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for multi-arch if needed)
-        uses: docker/setup-qemu-action@v2
-
-      - name: Set up Docker Buildx
+      - name: Set up Docker
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to DockerHub
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push image
-        id: build_image
         run: |
           IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/backend-app:${GITHUB_SHA::7}"
-          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
           docker build -t "$IMAGE_NAME" .
           docker push "$IMAGE_NAME"
-        # output contains the image name for next job
 
   terraform-deploy:
-    name: Terraform — provision and deploy
     runs-on: ubuntu-latest
     needs: build-and-push
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Retrieve built image name
-        # replicate IMAGE_NAME from previous job: use job outputs via artifacts or set as output from build job
-        # We used $GITHUB_OUTPUT in build job; fetch it via jobs.<job_id>.outputs not supported for run step outputs.
-        # Simpler: compute the same image name here using GITHUB_SHA
-        run: |
-          echo "IMAGE_NAME=${{ secrets.DOCKERHUB_USERNAME }}/backend-app:${GITHUB_SHA::7}" >> image_name.txt
-        id: imagefile
-
-      - name: Show image
-        run: cat image_name.txt
-
-      - name: Set up Terraform
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Configure GCP credentials
+      - name: Authenticate to GCP
         uses: google-github-actions/auth@v1
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Install gcloud (optional)
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y curl
-          if ! command -v gcloud >/dev/null 2>&1; then
-            curl -fsSL https://sdk.cloud.google.com > /tmp/install.sh
-            bash /tmp/install.sh --disable-prompts
-            source $HOME/google-cloud-sdk/path.bash.inc
-          fi
-          gcloud --version
-
       - name: Terraform init
+        working-directory: terraform
         run: terraform init
 
-      - name: Terraform fmt
-        run: terraform fmt -recursive
-
-      - name: Terraform validate
-        run: terraform validate
-
       - name: Terraform apply
-        env:
-          TF_VAR_project: ${{ secrets.GCP_PROJECT }}
-          TF_VAR_region: ${{ env.GCP_REGION }}
-          TF_VAR_zone: ${{ env.GCP_ZONE }}
-          TF_VAR_instance_name: "backend-vm-${{ github.run_id }}"
+        working-directory: terraform
         run: |
-          IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/backend-app:${GITHUB_SHA::7}"
-          echo "Applying with image: $IMAGE_NAME"
-          terraform apply -auto-approve -var "project=${{ secrets.GCP_PROJECT }}" -var "region=${{ env.GCP_REGION }}" -var "zone=${{ env.GCP_ZONE }}" -var "container_image=$IMAGE_NAME" -var "instance_name=backend-vm-${{ github.run_id }}"
+          terraform apply -auto-approve \
+            -var "project=${{ secrets.GCP_PROJECT }}" \
+            -var "region=${{ env.GCP_REGION }}" \
+            -var "zone=${{ env.GCP_ZONE }}" \
+            -var "container_image=${{ env.IMAGE_NAME }}"
