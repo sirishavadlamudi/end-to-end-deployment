@@ -46,11 +46,11 @@ resource "google_compute_instance" "app_vm" {
   EOF
 }
 
-# Output the instance name and public IP
+# Output values
 output "instance_name" {
   value = google_compute_instance.app_vm.name
 }
 
 output "instance_ip" {
-  value =
+  value = google_compute_instance.app_vm.network_interface[0].access_config[0].nat_ip
 }
